@@ -51,8 +51,7 @@ RUN apt-get update && apt-get install -yy \
     curl \
     build-essential \
     libpixman-1-0 \
-    libglib2.0-0 \
-    pysnmp
+    libglib2.0-0    
 RUN easy_install \
     tox \
     pip \
@@ -62,7 +61,8 @@ RUN pip install \
     robotframework \
     robotframework-requests \
     robotframework-sshlibrary \
-    robotframework-scplibrary
+    robotframework-scplibrary \
+    pysnmp
 RUN wget https://sourceforge.net/projects/ipmitool/files/ipmitool/1.8.18/ipmitool-1.8.18.tar.bz2
 RUN tar xvfj ipmitool-*.tar.bz2
 RUN ./ipmitool-1.8.18/configure
