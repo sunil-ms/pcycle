@@ -1,21 +1,3 @@
-Skip to content
-This repository
-Search
-Pull requests
-Issues
-Marketplace
-Explore
- @sunilmamillapall1
-Sign out
-29
-5 14 openbmc/openbmc-build-scripts
- Code  Issues 4  Pull requests 0  Projects 0  Wiki  Insights
-openbmc-build-scripts/scripts/build-qemu-robot-docker.sh
-7a88f29  on Jan 29
-@geissonator geissonator Allow a different qemu-system-arm to be passed to test scripts
-@geissonator @rahulmah @saqibkh
-     
-Executable File  89 lines (76 sloc)  1.86 KB
 #!/bin/bash -xe
 #
 # Build the required docker image to run QEMU and Robot test cases
