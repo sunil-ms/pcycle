@@ -56,18 +56,8 @@ RUN easy_install \
     tox \
     pip \
     requests
-RUN pip install \
-    json2yaml \
-    robotframework \
-    robotframework-requests \
-    robotframework-sshlibrary \
-    robotframework-scplibrary \
+RUN pip install \   
     pysnmp
-RUN wget https://sourceforge.net/projects/ipmitool/files/ipmitool/1.8.18/ipmitool-1.8.18.tar.bz2
-RUN tar xvfj ipmitool-*.tar.bz2
-RUN ./ipmitool-1.8.18/configure
-RUN make
-RUN make install
 RUN grep -q ${GROUPS} /etc/group || groupadd -g ${GROUPS} ${USER}
 RUN grep -q ${UID} /etc/passwd || useradd -d ${HOME} -m -u ${UID} -g ${GROUPS} \
                     ${USER}
@@ -81,15 +71,3 @@ EOF
 
 # Build above image
 docker build -t ${DOCKER_IMG_NAME} - <<< "${Dockerfile}"
-© 2018 GitHub, Inc.
-Terms
-Privacy
-Security
-Status
-Help
-Contact GitHub
-API
-Training
-Shop
-Blog
-About
