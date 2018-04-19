@@ -1,0 +1,288 @@
+#!/afs/rchland.ibm.com/usr6/sunilmam/sandbox/apollodev/src/aipl/x86/snmp_pdureset/snmp_pduonoff/bin/python
+
+from pysnmp.hlapi import *
+from pysnmp.error import PySnmpError
+from p_cycle_exceptions import *
+import sys
+import os
+import time
+import argparse
+import logging
+
+parser = argparse.ArgumentParser(
+    description='A tool to power cycle a system.', usage='%(prog)s [options]',
+    formatter_class=argparse.RawTextHelpFormatter,
+    epilog='Example usage:\n'
+    'e.g. ./p_cycle <pdu_host1>:<pdu_host2> <pdu_vendor1>:<pdu_vendor2> '
+    '<system> --outlet_numbers <outlet_numbers1>:<outlet_numbers2>\n'
+    'The above command power cycles <system> which is connected to <outlet_numbers1> '
+    'on <pdu_host1> and <outlet_numbers2> on <pdu_host2>.')
+
+parser.add_argument('pdu_hosts', type=lambda s: [pdu for pdu in s.split(
+    ':')], help='The hostname/IP of the PDU.\n'
+    'Multiple PDUs can be specified as a colon separated string.')
+parser.add_argument('pdu_vendors', type=lambda s: [vendor for vendor in s.split(
+    ':')], help='Vendor name for the PDUs. Supported vendors are IBM, Eaton.\n'
+    'Multiple names can be specified as a colon separated string.\n')
+parser.add_argument(
+    'system', help='The hostname/IP of the BMC/FSP to be power cycled.')
+parser.add_argument('-o', '--outlet_numbers',
+                    type=lambda s: [[int(item) for item in outlets.split(
+                        ',')] for outlets in s.split(':')],
+                    required=True, help='The outlets to which the system is '
+                    'connected to. \nMultiple outlets can be specified as a '
+                    'comma separated string.\n'
+                    'Delimit each set of outlets with a colon for multiple PDUs.\n')
+parser.add_argument('--snmp_version', required=False, default="v1",
+                    help='The SNMP version to be used. Default is v1.')
+parser.add_argument('--power_off_timeout', default=40, type=int,
+                    help="Timeout value for 'power off' operation in seconds. This is "
+                        "the amount of time we wait after initiating a 'power off' and "
+                        "before marking the operation as a failure. "
+                        "Default is 40.")
+parser.add_argument('--power_on_timeout', default=40, type=int,
+                    help="Timeout value for 'power on' operation in seconds. This is\n"
+                        "the amount of time we wait after initiating a 'power on' and\n"
+                        "before marking the operation as a failure. Default is 40.")
+parser.add_argument('--ping_timeout', default=300, type=int,
+                    help="Timeout value for ping operation in seconds. "
+                        "Default is 300.")
+parser.add_argument('--log', required=False, default="debug",
+                    help="Set the log level. Values can be info, debug, warning etc.")
+args = parser.parse_args()
+numeric_level = getattr(logging, args.log.upper(), None)
+logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s',
+                    datefmt='#(%Z) %m/%d/%Y %I:%M:%S %p - ', level=numeric_level)
+
+# Validate the input.
+if not (len(args.pdu_hosts) == len(args.pdu_vendors) == len(args.outlet_numbers)):
+    logging.critical(
+        "Wrong arguments passed. Number of colon delimited values "
+        "for PDU hostname, PDU vendor, outlets must match.")
+    exit(1)
+
+# List of vendors supported by the tool.
+vendor_list = ['ibm', 'eaton']
+
+# eaton pdu-cycle script path.
+EATON_PCYCLE_SCRIPT_PATH = "/afs/rch/projects/esw/dvt/autoipl/apolloprep/bin/pcycle"
+
+
+def process_command_output(i_error_indication, i_error_status, i_error_index, i_var_binds):
+    r"""Analyze the output returned by a SNMP request and return
+        output back to the caller.
+
+    Description of argument(s):
+    i_error_indication   If set to True, indicates SNMP engine error.
+    i_error_status       If set to True, indicates SNMP PDU error.
+    i_error_index        Non-zero value refers to i_var_binds[i_error_index-1]
+    i_var_binds          A tuple of ObjectType class instances representing
+                         MIB variables returned in SNMP response.
+    """
+
+    # Process the output returned from a SNMP request.
+    if i_error_indication:
+        logging.critical(i_error_indication)
+    elif i_error_status:
+        logging.critical("{} at {}".format(i_error_status.prettyPrint(
+        ), i_error_index and i_var_binds[int(i_error_index) - 1][0] or '?'))
+    else:
+        for i_var_bind in i_var_binds:
+            var_string = ' = '.join(list(x.prettyPrint() for x in i_var_bind))
+            output = var_string.split('=')[1]
+            logging.debug('\t\t' + var_string)
+            return int(output)
+
+
+def get_pdu_outlet_count(i_kwargs):
+    r"""Return the outlet count for a ePDU.
+
+    Description of argument(s):
+    i_kwargs    Holds a sequence of keyword-arguments to start a SNMP session.
+    """
+
+    # Get the outlet count.
+    logging.debug("\tGetting outlet count.")
+    g = getCmd(i_kwargs['snmp_engine'],
+               i_kwargs['community_data'],
+               i_kwargs['transport_target'],
+               i_kwargs['context_data'],
+               ObjectType(
+                   ObjectIdentity('SNMPv2-SMI', 'enterprises', 2, 6, 223, 8, 2, 1, 0)))
+
+    # getCmd() returns a generator object, so invoke next() to perform the actual query.
+    l_error_indication, l_error_status, l_error_index, l_var_binds = g.next()
+
+    # Process the output returned.
+    return process_command_output(l_error_indication, l_error_status, l_error_index, l_var_binds)
+
+
+def get_pdu_outlet_state(i_outlet_number, i_kwargs):
+    r"""
+    Return the outlet/relay state on a ePDU.
+
+    Description of argument(s)
+    i_outlet_number    Outlet number on the PDU whose state is queried.
+    i_kwargs           Holds a sequence of keyword-arguments to start a SNMP session.
+    """
+
+    # Get the outlet state
+    logging.debug(
+        "\tGetting outlet state for outlet number {}.".format(i_outlet_number))
+    g = getCmd(i_kwargs['snmp_engine'],
+               i_kwargs['community_data'],
+               i_kwargs['transport_target'],
+               i_kwargs['context_data'],
+               ObjectType(ObjectIdentity(
+                   'SNMPv2-SMI', 'enterprises', 2, 6, 223, 8, 2, 2, 1, 11, i_outlet_number)))
+
+    # getCmd() returns a generator object, so invoke next() to perform the actual query.
+    l_error_indication, l_error_status, l_error_index, l_var_binds = g.next()
+
+    # Process the output returned.
+    return process_command_output(l_error_indication, l_error_status, l_error_index, l_var_binds)
+
+
+def set_pdu_outlet_state(i_outlet_number, i_state, i_kwargs):
+    r"""Set the outlet/relay state on a ePDU to either ON(1) or OFF(0).
+
+    Description of argument(s)
+    i_outlet_number    Outlet number on the PDU whose state has to be modified.
+    i_state            Target state of the PDUs i_outlet_number. Can be one of 1(ON) or 0(OFF).
+    i_kwargs           Holds a sequence of keyword-arguments to start a SNMP session.
+    """
+
+    # Set the outlet state.
+    logging.debug("\tSetting outlet state to {} for outlet number {}.".format(
+        i_state, i_outlet_number))
+    g = setCmd(i_kwargs['snmp_engine'],
+               i_kwargs['community_data'],
+               i_kwargs['transport_target'],
+               i_kwargs['context_data'],
+               ObjectType(ObjectIdentity('SNMPv2-SMI',
+                                         'enterprises', 2, 6, 223, 8, 2, 2, 1, 11, i_outlet_number),
+                                         Integer32(i_state)))
+
+    # setCmd() returns a generator object, so invoke next() to perform the actual query.
+    l_error_indication, l_error_status, l_error_index, l_var_binds = g.next()
+
+    # Process the output returned.
+    return process_command_output(l_error_indication, l_error_status, l_error_index, l_var_binds)
+
+
+def do_power_cycle_on_ibm_pdu(i_pdu_host, i_outlets, i_power_off_timeout,
+                              i_power_on_timeout, i_ping_timeout):
+    r"""Inititate all session variables and do a power cycle.
+
+    Description of argument(s)
+    i_pdu_host                 The hostname/IP of the PDU
+    i_outlets                  The outlets to which the system connected to.
+    i_power_off_timeout        Timeout value for 'power off' operation in seconds.
+    i_power_on_timeout         Timeout value for 'power on' operation in seconds.
+    i_ping_timeout             Timeout value for ping request in seconds.
+    """
+
+    # Hash table to hold session data.
+    l_session_args = {}
+    l_session_args['snmp_engine'] = SnmpEngine()
+    l_session_args['transport_target'] = UdpTransportTarget((i_pdu_host, 161))
+    l_session_args['context_data'] = ContextData()
+
+    # Currently, we don't handle SNMP v3.
+    if args.snmp_version.lower() == "v1" or args.snmp_version.lower() == "v2":
+        l_session_args['community_data'] = CommunityData('public', mpModel=0)
+    else:
+        logging.critical("We don't support SNMP v3 yet.")
+        exit(1)
+    l_outlet_count = get_pdu_outlet_count(l_session_args)
+    for outlet in i_outlets:
+        try:
+            if not 1 <= int(outlet) <= int(l_outlet_count):
+                raise InvalidOutletNumberException(outlet, l_outlet_count)
+        except InvalidOutletNumberException as e:
+            logging.critical(e)
+            exit(1)
+
+        # Start a 'power off', 'power on' sequence.
+        logging.info("Initiating 'power off' on outlet {}.".format(outlet))
+        try:
+            set_pdu_outlet_state(outlet, 0, l_session_args)
+        except PySnmpError as e:
+            logging.critical(e)
+            exit(1)
+        while((get_pdu_outlet_state(outlet, l_session_args) != 0) and i_power_off_timeout >= 0):
+            time.sleep(5)
+            i_power_off_timeout -= 5
+        try:
+            if i_power_off_timeout < 0:
+                raise PowerOffTimeoutException(outlet)
+        except PowerOffTimeoutException as e:
+            logging.critical(e)
+            exit(1)
+    logging.info("All outlets powered off. Checking system status.")
+    time.sleep(5)
+    try:
+        if(not os.system("ping -c 1 -w2 " + args.system + " > /dev/null 2>&1")):
+            raise PowerOffPingException
+    except PowerOffPingException as e:
+        logging.critical(e)
+        exit(1)
+    logging.info(
+        '{} is not reachable. Power Off successful'.format(args.system))
+
+    for outlet in i_outlets:
+        logging.info("Initiating 'power on' on outlet {}.".format(outlet))
+        try:
+            set_pdu_outlet_state(outlet, 1, l_session_args)
+        except PySnmpError as e:
+            logging.critical(e)
+            exit(1)
+        while((get_pdu_outlet_state(outlet, l_session_args) != 1) and i_power_on_timeout >= 0):
+            time.sleep(5)
+            i_power_on_timeout -= 5
+        try:
+            if i_power_on_timeout < 0:
+                raise PowerOnTimeoutException(outlet)
+        except PowerOnTimeoutException as e:
+            logging.critical(e)
+            exit(1)
+    logging.info("All outlets powered on. Checking system status.")
+    while(os.system("ping -c 1 -w2 " + args.system + " > /dev/null 2>&1") and i_ping_timeout >= 0):
+        time.sleep(2)
+        i_ping_timeout -= 2
+    try:
+        if(i_ping_timeout < 0):
+            raise PowerOnPingException()
+    except PowerOnPingException as e:
+        logging.critical(
+            "System not reachable after Power cycle. Please contact lab support team")
+        exit(1)
+    l_pre_red_text = "\x1B[31;40m"
+    l_suf_red_text = "\x1B[0m"
+    logging.info("{0} is ".format(args.system) + l_pre_red_text + "pingable " +
+                 l_suf_red_text + "after power" + l_pre_red_text+" on."+l_suf_red_text)
+    return True
+
+
+def main():
+    r""" main function for the power cycle operation."""
+
+    for i in range(len(args.pdu_hosts)):
+        if args.pdu_vendors[i].lower() not in vendor_list:
+            logging.error(
+                "Currently we don't support PDU cycling on {}.".format(args.vendor_name))
+            exit(6)
+        elif args.pdu_vendors[i].lower() == 'ibm':
+            do_power_cycle_on_ibm_pdu(
+                args.pdu_hosts[i], args.outlet_numbers[i], args.power_off_timeout,
+                args.power_on_timeout, args.ping_timeout)
+        elif args.pdu_vendors[i].lower() == 'eaton':
+            l_outlet_nums = ''.join(str(i) for i in args.outlet_numbers[i])
+            # Invoke existing script for Eaton ePDU.
+            os.system(
+                "{} --ipc_host={} --outlet_nums={}".format(EATON_PCYCLE_SCRIPT_PATH,
+                                                           args.pdu_hosts[i],
+                                                           l_outlet_nums))
+
+
+main()
